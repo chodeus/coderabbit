@@ -65,7 +65,9 @@ reviews:
           indexer id that dies when the provider is deleted and re-added). Persist per event in history.
         - Database and remote cost: partial updates use SetFields, not a full-row update; batch rather than
           write per item; do not load a whole library into memory; do not multiply metadata-server calls.
-        - Log rejections at Warn. Do not suggest wrapping Trace/Debug calls in log-level checks.
+        - Decision-engine and import specifications log their rejection reasons at Debug, like the existing ones;
+          use Warn only for a failure that stops an item and needs the user. Do not suggest wrapping Trace/Debug
+          calls in log-level checks.
         - Parse numbers and dates culture-invariantly. Prefer early returns over nested conditionals and
           nested ternaries. No `dynamic`. Enums are PascalCase. Do not suggest adding `sealed`.
         - Delete dead code rather than commenting it out.
