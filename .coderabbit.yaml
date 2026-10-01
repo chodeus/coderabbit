@@ -1,5 +1,5 @@
 # Central CodeRabbit config: applies to any chodeus repository without its own .coderabbit.yaml.
-# Written for the Lidarr fork, whose review branches can't carry a config file; Lidarr rules are scoped to Lidarr paths.
+# Serves the forks whose review branches can't carry a config file (Lidarr, unraid-appdata.backup); each fork's rules are scoped to its own paths.
 language: "en-US"
 
 reviews:
@@ -20,9 +20,10 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    # Fork feature branches are reviewed as PRs into develop; the default branch is always included.
+    # Fork review PRs target develop (Lidarr) or testing (unraid-appdata.backup); the default branch is always included.
     base_branches:
       - "^develop$"
+      - "^testing$"
 
   path_filters:
     - "!**/bin/**"
@@ -38,16 +39,20 @@ reviews:
     - "!**/*.ico"
     - "!**/yarn.lock"
     - "!**/package-lock.json"
+    - "!**/*.tgz"
+    - "!**/*.txz"
 
   path_instructions:
     - path: "**"
       instructions: |
         Review logic, correctness, data safety and security. Do not report formatting, import order or
-        naming that linters and StyleCop already enforce, and do not ask for cleanup of existing code the
-        change does not touch.
+        naming that linters already enforce (StyleCop on Lidarr), and do not ask for cleanup of existing
+        code the change does not touch.
         - Fix the root cause. A null guard or try/catch that hides bad input is a finding, not a fix.
         - Comments explain a non-obvious why in one or two lines. Flag comments that narrate what the code
           does, change history, or read as generated prose.
+        - A comment, docstring, help text, log message or UI label that disagrees with what the code does is
+          a correctness finding, not a stale-comment nit: report it and say which side is wrong.
         - One concern per change: flag unrelated edits, IDE or tool files, and CI changes that only suit a fork.
         - Never cache or persist a transient failure (timeout, 5xx, rate limit) as a real empty or negative result.
         - Never put a token, API key or password in a URL, query string, log line or exception message.
@@ -111,3 +116,78 @@ reviews:
         NUnit with FluentAssertions. Test methods are lower_snake_case and folders match namespaces.
         Test data uses obvious placeholders ("Artist Name", "Album Title"), never real artist names, paths,
         hosts or credentials. The change's behaviour must be covered, and each new test must be able to fail.
+
+    - path: "src/{include,scripts}/*.php"
+      instructions: |
+        unraid-appdata.backup engine. emhttp plugin PHP: no Composer or autoloader, raw includes, and Unraid
+        runtime globals (DockerClient, DockerTemplates, _var, $var) come from the webGui, so do not flag them
+        as undefined. backup.php runs as root from cron: it stops containers, tars their volumes, verifies,
+        restarts them and deletes old backup sets.
+        - Supported range is Unraid 6.12 (PHP 8.2) to 7.4 (PHP 8.4). Flag PHP 8.3+ syntax or functions
+          (typed class constants, json_validate, array_find, property hooks, `new` chained without
+          parentheses). Unraid internals differ by release, so a change that relies on newer webGui behaviour
+          needs a fallback for the older one. Precedent: 7.4's flash_backup streams the zip to stdout, while
+          6.12-7.3 write a file and print its name.
+        - Fail closed: never tar a container whose stop was not confirmed by a fresh state read, and never
+          downgrade a failure that should fail the run to INFO or WARN. Precedent: ignoreBackupErrors=yes
+          logged tar failures at INFO, the run reported success, and retention rotated the good sets out.
+        - Retention deletes ab_* sets with rm -rf: it must not run after a failed run, must stay confined to
+          the destination's ab_* entries, and must never delete the newest good set.
+        - Excludes: split stored lists on CRLF, LF and CR (precedent: explode("\r\n") silently dropped LF-only
+          excludes and archives grew by 100+ GB). An exclude must apply to the path tar actually reads,
+          including any mapped or snapshot path.
+        - External commands: escapeshellarg every interpolated value; long-running commands keep
+          ABSettings::$externalCmdPidCapture so Abort can kill them; never capture large output in memory
+          (exec() into $output with a multi-GB stdout exhausts PHP's 256M limit).
+        - Containers: after the run, start only the containers the run stopped, in autostart order with their
+          delays. "No such container" (Docker 404) is not retried.
+        - Never put an API key or token in config.json (it is copied into every backup set, readable by the
+          users group over SMB), a log line, the debug log (users post it publicly) or a command line.
+
+    - path: "src/include/http.php"
+      instructions: |
+        unraid-appdata.backup AJAX action endpoint. Unraid's local_prepend.php checks csrf_token on POST only,
+        and the webGui's global $.ajaxPrefilter adds it to every same-origin jQuery POST (6.12-7.4). So actions
+        that change state (manualBackup, abort, startRestore, copyConfigFromProd) must be POST-only and read
+        $_POST; flag any state change reachable by GET or through $_REQUEST, but do not ask the endpoint to
+        re-verify the token. Read-only actions may stay GET. startRestore starts a root restore that extracts
+        archives to a user-chosen destination: flag any unvalidated path that reaches tar or the filesystem.
+
+    - path: "src/{pages/content/*.php,**/*.page}"
+      instructions: |
+        unraid-appdata.backup pages: PHP, HTML and inline jQuery inside the Unraid page layout.
+        - A bare same-origin $.post or $.ajax({type: 'POST'}) is correct, because Unraid's global ajaxPrefilter
+          adds csrf_token on 6.12-7.4; do not flag it. Flag a state-changing call made with GET, and a fetch or
+          XHR to a plugin PHP endpoint that does not send csrf_token as a POST field (the X-CSRF-Token header is
+          only accepted from Unraid 7.3.0).
+        - The settings form posts the whole config: a new setting must round-trip through the form with a
+          default, so saving the page never drops or reverts it; config keys must load with defaults in both
+          older and newer builds.
+        - Escape container names, paths and log text before inserting them into the DOM.
+        - 0 and "" are real values; do not use || or bare truthiness where they are legitimate.
+
+    - path: "appdata.backup*.plg"
+      instructions: |
+        unraid-appdata.backup manifest. The <FILE Run> install and Method="remove" scripts run as root.
+        - The remove method deletes /boot/config/plugins/appdata.backup, the user's config: never widen any
+          rm, and never delete outside the plugin's two fixed directories.
+        - Versions must keep increasing by strcmp, because Unraid's plugin install refuses an older version.
+          pluginURL must name the branch the manifest ships from, and the sha256 must match the release asset.
+        - min="6.12" stays unless the code really needs a newer Unraid; raising it needs a matching
+          pre-install check.
+        - Fix branches meant for upstream must not touch the manifests (the maintainer cuts releases); only
+          the testing branch's packaging commit edits them.
+
+  tools:
+    gitleaks:
+      enabled: true
+    # off: emhttp PHP has no stubs, so phpstan/phpmd/phpcs flag Unraid's runtime globals as undefined and bury real findings
+    phpstan:
+      enabled: false
+    phpmd:
+      enabled: false
+    phpcs:
+      enabled: false
+    # off: style-only noise on README files
+    markdownlint:
+      enabled: false
